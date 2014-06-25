@@ -13,6 +13,7 @@ page_keywords: API, Docker, rcli, REST, documentation
  - The API tends to be REST, but for some complex commands, like `attach`
    or `pull`, the HTTP connection is hijacked to transport `STDOUT`,
    `STDIN` and `STDERR`.
+ - In all requests the container id is interchangable with its name
 
 # 2. Endpoints
 
@@ -23,6 +24,12 @@ page_keywords: API, Docker, rcli, REST, documentation
 `GET /containers/json`
 
 List containers
+    **Request paramaters**
+
+    all=false bool  Show all containers. Only running containers are shown by default
+    before="" string  Show only containers created before Id or Name, including non-running ones
+    since=""  string  Show only containers created since Id or Name, including non-running ones
+    size=false  bool  Also show container size information
 
     **Example request**:
 

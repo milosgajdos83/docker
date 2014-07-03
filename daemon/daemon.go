@@ -47,50 +47,87 @@ var (
 	validContainerNamePattern = regexp.MustCompile(`^/?` + validContainerNameChars + `+$`)
 )
 
-type contStore struct {
-	s map[string]*Container
+type FSObject interface {
+	ToDisk() error
+	FromDisk() error
+	BasefsPath() string
+	RootfsPath() string
+}
+
+type FS struct {
+	sync.Mutex
+	ID     string
+	Name   string
+	root   string // Path to the "home" of the object, including metadata.
+	basefs string // Path to the graphdriver mountpoint
+}
+
+func (f *FS) jsonPath() {
+	f.getRootResourcePath("config.json")
+}
+
+func (f *FS) getRootResourcePath(path string) {
+	cleanPath := filepath.Join("/", path)
+	return symlink.FollowSymlinkInScope(filepath.Join(f.root, cleanPath), f.root)
+}
+
+func (f *FS) getResourcePath(path string) (string, error) {
+	cleanPath := filepath.Join("/", path)
+	return symlink.FollowSymlinkInScope(filepath.Join(f.basefs, cleanPath), f.basefs)
+}
+
+func (f *FS) BasefsPath() string {
+	return f.basefs
+}
+
+func (f *FS) RootfsPath() string {
+	return f.root
+}
+
+type fsStore struct {
+	s map[string]*FSObject
 	sync.Mutex
 }
 
-func (c *contStore) Add(id string, cont *Container) {
+func (c *fsStore) Add(id string, cont *FS) {
 	c.Lock()
 	c.s[id] = cont
 	c.Unlock()
 }
 
-func (c *contStore) Get(id string) *Container {
+func (c *fsStore) Get(id string) *FS {
 	c.Lock()
 	res := c.s[id]
 	c.Unlock()
 	return res
 }
 
-func (c *contStore) Delete(id string) {
+func (c *fsStore) Delete(id string) {
 	c.Lock()
 	delete(c.s, id)
 	c.Unlock()
 }
 
-func (c *contStore) List() []*Container {
-	containers := new(History)
+func (c *fsStore) List() []*FS {
+	objects := new(History)
 	c.Lock()
 	for _, cont := range c.s {
-		containers.Add(cont)
+		objects.Add(cont)
 	}
 	c.Unlock()
-	containers.Sort()
-	return *containers
+	objects.Sort()
+	return *objects
 }
 
 type Daemon struct {
 	repository     string
 	sysInitPath    string
-	containers     *contStore
+	containers     *fsStore
 	graph          *graph.Graph
 	repositories   *graph.TagStore
 	idIndex        *truncindex.TruncIndex
 	sysInfo        *sysinfo.SysInfo
-	volumes        *graph.Graph
+	volumes        *fsStore
 	srv            Server
 	eng            *engine.Engine
 	config         *daemonconfig.Config
@@ -857,12 +894,12 @@ func NewDaemonFromDirectory(config *daemonconfig.Config, eng *engine.Engine) (*D
 
 	daemon := &Daemon{
 		repository:     daemonRepo,
-		containers:     &contStore{s: make(map[string]*Container)},
+		containers:     &fsStore{s: make(map[string]*Container)},
 		graph:          g,
 		repositories:   repositories,
 		idIndex:        truncindex.NewTruncIndex([]string{}),
 		sysInfo:        sysInfo,
-		volumes:        volumes,
+		volumes:        &fsStore{s: make(map[string]*Volume)},
 		config:         config,
 		containerGraph: graph,
 		driver:         driver,

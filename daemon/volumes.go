@@ -10,27 +10,92 @@ import (
 
 	"github.com/dotcloud/docker/archive"
 	"github.com/dotcloud/docker/daemon/execdriver"
+	"github.com/dotcloud/docker/daemon/graphdriver"
 	"github.com/dotcloud/docker/pkg/symlink"
 )
 
-type BindMap struct {
-	SrcPath string
-	DstPath string
-	Mode    string
+type Volume struct {
+	*FS
+	MountPath   string
+	mode        string
+	isHostMount bool
+}
+
+func (v *Volume) IsRW() bool {
+	if v.Mode == "rw" {
+		return true
+	}
+	return false
+}
+
+func (v *Volume) driver() *graph.Graph {
+	return daemon.volumes
+}
+
+func newVolume(name, volPath, hostPath, mode string) (Volume, error) {
+	v := Volume{mountPath: volPath, basefs: hostPath, isHostMount: false, mode: mode}
+	v.ID, v.Name = daemon.generateIdAndName(name)
+	if v.mode == "" {
+		v.mode = "rw"
+	}
+	if hostPath != "" {
+		v.isHostMount = true
+	}
+
+	return v, v.createIfNotExists()
+}
+
+func (v *Volume) create() error {
+	if err := driver().Create(v.ID, ""); err == nil {
+		return err
+	}
+	return nil
+}
+
+func (v *Volume) createIfNotExists() error {
+	if vol := GetVolume(v.ID); vol == nil {
+		return nil
+	}
+
+	if err := os.State(v.root); err == nil {
+		return nil
+	}
+
+	return v.create()
 }
 
 func prepareVolumesForContainer(container *Container) error {
 	if container.Volumes == nil || len(container.Volumes) == 0 {
-		container.Volumes = make(map[string]string)
+		container.Volumes = make(map[string]Volume)
 		container.VolumesRW = make(map[string]bool)
 		if err := applyVolumesFrom(container); err != nil {
 			return err
 		}
 	}
 
-	if err := createVolumes(container); err != nil {
-		return err
+	vols := []string{}
+	for volPath, hostPath := range container.Volumes {
+		for _, id := range container.VolumeIDs {
+			if v := GetVolume(id); id == nil {
+				return fmt.Errorf("Could not find volume: %v", id)
+			}
+			if v.basefs == hostPath {
+				vols = append(vols, volPath)
+			}
+		}
+		if vol := vols[volPath]; vol == nil {
+			// TODO: create volume?
+			mode := ""
+			if !container.VolumesRW[volPath] {
+				mode = "ro"
+			}
+			v := newVolume("", volPath, "", mode)
+			if err = v.createIfNotExists(); err != nil {
+				return err
+			}
+		}
 	}
+
 	return nil
 }
 
@@ -253,10 +318,13 @@ func initializeVolume(container *Container, volPath string, binds map[string]Bin
 		if err != nil {
 			return err
 		}
-
-		destination, err = volumesDriver.Get(c.ID, "")
+		volID, volName, err := daemon.generateIdAndName("")
 		if err != nil {
-			return fmt.Errorf("Driver %s failed to get volume rootfs %s: %s", volumesDriver, c.ID, err)
+			return err
+		}
+		destination, err = volumesDriver.Get(volID, "")
+		if err != nil {
+			return fmt.Errorf("Driver %s failed to get volume rootfs %s: %s", volumesDriver, volID, err)
 		}
 
 		srcRW = true

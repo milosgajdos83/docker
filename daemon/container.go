@@ -308,7 +308,7 @@ func (container *Container) Start() (err error) {
 		return err
 	}
 	container.verifyDaemonSettings()
-	if err := prepareVolumesForContainer(container); err != nil {
+	if err := container.prepareVolumes(); err != nil {
 		return err
 	}
 	linkedEnv, err := container.setupLinkedContainers()
@@ -322,7 +322,7 @@ func (container *Container) Start() (err error) {
 	if err := populateCommand(container, env); err != nil {
 		return err
 	}
-	if err := setupMountsForContainer(container); err != nil {
+	if err := container.setupMounts(); err != nil {
 		return err
 	}
 
@@ -1180,48 +1180,4 @@ func (container *Container) getNetworkedContainer() (*Container, error) {
 	default:
 		return nil, fmt.Errorf("network mode not set to container")
 	}
-}
-
-func (container *Container) GetVolumes() (map[string]*Volume, error) {
-	// Get all the bind-mounts
-	volumes, err := container.getBindMap()
-	if err != nil {
-		return nil, err
-	}
-
-	// Get all the normal volumes
-	for volPath, hostPath := range container.Volumes {
-		if _, exists := volumes[volPath]; exists {
-			continue
-		}
-		volumes[volPath] = &Volume{VolPath: volPath, HostPath: hostPath, isReadWrite: container.VolumesRW[volPath]}
-	}
-
-	return volumes, nil
-}
-
-func (container *Container) getBindMap() (map[string]*Volume, error) {
-	var (
-		// Create the requested bind mounts
-		volumes = map[string]*Volume{}
-		// Define illegal container destinations
-		illegalDsts = []string{"/", "."}
-	)
-
-	for _, bind := range container.hostConfig.Binds {
-		vol, err := parseBindVolumeSpec(bind)
-		if err != nil {
-			return nil, err
-		}
-		vol.isBindMount = true
-		// Bail if trying to mount to an illegal destination
-		for _, illegal := range illegalDsts {
-			if vol.VolPath == illegal {
-				return nil, fmt.Errorf("Illegal bind destination: %s", vol.VolPath)
-			}
-		}
-
-		volumes[filepath.Clean(vol.VolPath)] = &vol
-	}
-	return volumes, nil
 }

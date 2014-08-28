@@ -4,11 +4,10 @@ import (
 	"fmt"
 	"os"
 	"path"
-	"path/filepath"
-	"strings"
 
 	"github.com/docker/docker/engine"
 	"github.com/docker/docker/pkg/log"
+	"github.com/docker/docker/volumes"
 )
 
 func (daemon *Daemon) ContainerRm(job *engine.Job) engine.Status {
@@ -21,10 +20,11 @@ func (daemon *Daemon) ContainerRm(job *engine.Job) engine.Status {
 	forceRemove := job.GetenvBool("forceRemove")
 	container := daemon.Get(name)
 
+	if container == nil {
+		job.Errorf("No such container: %s", name)
+	}
+
 	if removeLink {
-		if container == nil {
-			return job.Errorf("No such link: %s", name)
-		}
 		name, err := GetFullContainerName(name)
 		if err != nil {
 			job.Error(err)
@@ -49,85 +49,50 @@ func (daemon *Daemon) ContainerRm(job *engine.Job) engine.Status {
 		return engine.StatusOK
 	}
 
-	if container != nil {
-		if container.State.IsRunning() {
-			if forceRemove {
-				if err := container.Kill(); err != nil {
-					return job.Errorf("Could not kill running container, cannot remove - %v", err)
-				}
-			} else {
-				return job.Errorf("You cannot remove a running container. Stop the container before attempting removal or use -f")
+	if container.State.IsRunning() {
+		if forceRemove {
+			if err := container.Kill(); err != nil {
+				return job.Errorf("Could not kill running container, cannot remove - %v", err)
 			}
+		} else {
+			return job.Errorf("You cannot remove a running container. Stop the container before attempting removal or use -f")
 		}
-		if err := daemon.Destroy(container); err != nil {
-			return job.Errorf("Cannot destroy container %s: %s", name, err)
+	}
+	if err := daemon.Destroy(container); err != nil {
+		return job.Errorf("Cannot destroy container %s: %s", name, err)
+	}
+	container.LogEvent("destroy")
+
+	if removeVolume {
+		vols, err := container.VolumeIDs()
+		if err != nil {
+			return job.Errorf("Could not get volumes: %s", err)
 		}
-		container.LogEvent("destroy")
 
-		if removeVolume {
-			var (
-				volumes     = make(map[string]struct{})
-				binds       = make(map[string]struct{})
-				usedVolumes = make(map[string]*Container)
-			)
-
-			// the volume id is always the base of the path
-			getVolumeId := func(p string) string {
-				return filepath.Base(strings.TrimSuffix(p, "/layer"))
-			}
-
-			// populate bind map so that they can be skipped and not removed
-			for _, bind := range container.HostConfig().Binds {
-				source := strings.Split(bind, ":")[0]
-				// TODO: refactor all volume stuff, all of it
-				// it is very important that we eval the link or comparing the keys to container.Volumes will not work
-				//
-				// eval symlink can fail, ref #5244 if we receive an is not exist error we can ignore it
-				p, err := filepath.EvalSymlinks(source)
-				if err != nil && !os.IsNotExist(err) {
-					return job.Error(err)
-				}
-				if p != "" {
-					source = p
-				}
-				binds[source] = struct{}{}
-			}
-
-			// Store all the deleted containers volumes
-			for _, volumeId := range container.Volumes {
-				// Skip the volumes mounted from external
-				// bind mounts here will will be evaluated for a symlink
-				if _, exists := binds[volumeId]; exists {
-					continue
-				}
-
-				volumeId = getVolumeId(volumeId)
-				volumes[volumeId] = struct{}{}
-			}
-
-			// Retrieve all volumes from all remaining containers
-			for _, container := range daemon.List() {
-				for _, containerVolumeId := range container.Volumes {
-					containerVolumeId = getVolumeId(containerVolumeId)
-					usedVolumes[containerVolumeId] = container
-				}
-			}
-
-			for volumeId := range volumes {
-				// If the requested volu
-				if c, exists := usedVolumes[volumeId]; exists {
-					log.Infof("The volume %s is used by the container %s. Impossible to remove it. Skipping.", volumeId, c.ID)
-					continue
-				}
-				if err := daemon.Volumes().Delete(volumeId); err != nil {
-					return job.Errorf("Error calling volumes.Delete(%q): %v", volumeId, err)
-				}
-			}
-		}
-	} else {
-		return job.Errorf("No such container: %s", name)
+		daemon.DeleteVolumes(vols)
 	}
 	return engine.StatusOK
+}
+
+func (daemon *Daemon) DeleteVolumes(volumeIDs []string) {
+	for _, id := range volumeIDs {
+		if err := daemon.volumes.Delete(id); err != nil {
+			if volumes.VolumeInUse(err) {
+				vol := daemon.volumes.Get(id)
+				var usedByContainerId string
+				// Just get the first container ID so it can be used in the error message
+				for id := range vol.Containers {
+					usedByContainerId = id
+					break
+				}
+				log.Infof("Cannot remove volume %s as it is used by: %s", vol.ID, usedByContainerId)
+				continue
+			}
+			log.Debugf("%s", err)
+			continue
+		}
+	}
+	return
 }
 
 // Destroy unregisters a container from the daemon and cleanly removes its contents from the filesystem.
@@ -149,6 +114,9 @@ func (daemon *Daemon) Destroy(container *Container) error {
 	// Deregister the container before removing its directory, to avoid race conditions
 	daemon.idIndex.Delete(container.ID)
 	daemon.containers.Delete(container.ID)
+	if err := container.derefVolumes(); err != nil {
+		log.Debugf("Error dereferencing volumes for container %s: %s", container.ID, err)
+	}
 
 	if _, err := daemon.containerGraph.Purge(container.ID); err != nil {
 		log.Debugf("Unable to remove container from link graph: %s", err)

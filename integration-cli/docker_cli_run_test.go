@@ -402,8 +402,8 @@ func TestApplyVolumesFromBeforeVolumes(t *testing.T) {
 	}
 
 	cmd = exec.Command(dockerBinary, "run", "--volumes-from", "parent", "-v", "/test", "busybox", "cat", "/test/foo")
-	if _, err := runCommand(cmd); err != nil {
-		t.Fatal(err)
+	if out, _, err := runCommandWithOutput(cmd); err != nil {
+		t.Fatal(out, err)
 	}
 
 	deleteAllContainers()

@@ -28,6 +28,7 @@ type Config struct {
 	Cmd             []string
 	Image           string // Name of the image as it was passed by the operator (eg. could be symbolic)
 	Volumes         map[string]struct{}
+	VolumeIDs       map[string]struct{}
 	WorkingDir      string
 	Entrypoint      []string
 	NetworkDisabled bool

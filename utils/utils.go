@@ -92,6 +92,12 @@ func dockerInitSha1(target string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+func SumString(value string) string {
+	h := sha1.New()
+	h.Write([]byte(value))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 func isValidDockerInitPath(target string, selfPath string) bool { // target and selfPath should be absolute (InitPath and SelfPath already do this)
 	if target == "" {
 		return false

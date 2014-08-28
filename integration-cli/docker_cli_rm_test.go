@@ -18,8 +18,8 @@ func TestRemoveContainerWithRemovedVolume(t *testing.T) {
 	}
 
 	cmd = exec.Command(dockerBinary, "rm", "-v", "losemyvolumes")
-	if _, err := runCommand(cmd); err != nil {
-		t.Fatal(err)
+	if out, _, err := runCommandWithOutput(cmd); err != nil {
+		t.Fatal(out, err)
 	}
 
 	deleteAllContainers()

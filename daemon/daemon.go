@@ -37,6 +37,7 @@ import (
 	"github.com/docker/docker/pkg/truncindex"
 	"github.com/docker/docker/runconfig"
 	"github.com/docker/docker/utils"
+	"github.com/docker/docker/volumes"
 )
 
 var (
@@ -88,7 +89,7 @@ type Daemon struct {
 	repositories   *graph.TagStore
 	idIndex        *truncindex.TruncIndex
 	sysInfo        *sysinfo.SysInfo
-	volumes        *graph.Graph
+	volumes        *volumes.Repository
 	eng            *engine.Engine
 	config         *Config
 	containerGraph *graphdb.Database
@@ -370,6 +371,12 @@ func (daemon *Daemon) restore() error {
 					log.Debugf("Failed to start container %s: %s", container.ID, err)
 				}
 			}
+		}
+	}
+
+	for _, c := range registeredContainers {
+		for _, mnt := range c.VolumeMounts() {
+			daemon.volumes.Add(mnt.volume)
 		}
 	}
 
@@ -778,17 +785,16 @@ func NewDaemonFromDirectory(config *Config, eng *engine.Engine) (*Daemon, error)
 		return nil, err
 	}
 
-	// We don't want to use a complex driver like aufs or devmapper
-	// for volumes, just a plain filesystem
 	volumesDriver, err := graphdriver.GetDriver("vfs", config.Root, config.GraphOptions)
 	if err != nil {
 		return nil, err
 	}
-	log.Debugf("Creating volumes graph")
-	volumes, err := graph.NewGraph(path.Join(config.Root, "volumes"), volumesDriver)
+
+	volumes, err := volumes.NewRepository(path.Join(config.Root, "volumes"), volumesDriver)
 	if err != nil {
 		return nil, err
 	}
+
 	log.Debugf("Creating repository list")
 	repositories, err := graph.NewTagStore(path.Join(config.Root, "repositories-"+driver.String()), g)
 	if err != nil {
@@ -1048,7 +1054,7 @@ func (daemon *Daemon) ExecutionDriver() execdriver.Driver {
 	return daemon.execDriver
 }
 
-func (daemon *Daemon) Volumes() *graph.Graph {
+func (daemon *Daemon) Volumes() *volumes.Repository {
 	return daemon.volumes
 }
 

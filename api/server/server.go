@@ -761,13 +761,17 @@ func postContainersStart(eng *engine.Engine, version version.Version, w http.Res
 	)
 
 	// allow a nil body for backwards compatibility
-	if r.Body != nil && r.ContentLength > 0 {
-		if err := checkForJson(r); err != nil {
-			return err
+	if r.Body != nil {
+		// If we have content, it must be of the correct type
+		if r.ContentLength > 0 && !api.MatchesContentType(r.Header.Get("Content-Type"), "application/json") {
+			return fmt.Errorf("Content-Type of application/json is required")
 		}
 
 		if err := job.DecodeEnv(r.Body); err != nil {
-			return err
+			// If there should be content to decode, fail, otherwise assume nil body
+			if r.ContentLength > 0 {
+				return err
+			}
 		}
 	}
 

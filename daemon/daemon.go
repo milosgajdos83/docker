@@ -130,6 +130,10 @@ func (daemon *Daemon) Install(eng *engine.Engine) error {
 		"execCreate":        daemon.ContainerExecCreate,
 		"execStart":         daemon.ContainerExecStart,
 		"execResize":        daemon.ContainerExecResize,
+		"volumesList":       daemon.VolumesList,
+		"volumeInspect":     daemon.VolumeInspect,
+		"volumeDelete":      daemon.VolumeDelete,
+		"volumeCreate":      daemon.VolumeCreate,
 	} {
 		if err := eng.Register(name, method); err != nil {
 			return err
@@ -400,9 +404,7 @@ func (daemon *Daemon) restore() error {
 	}
 
 	for _, c := range registeredContainers {
-		for _, mnt := range c.VolumeMounts() {
-			daemon.volumes.Add(mnt.volume)
-		}
+		c.registerVolumes()
 	}
 
 	if !debug {

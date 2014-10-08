@@ -6,16 +6,20 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/docker/docker/pkg/symlink"
+	"github.com/docker/docker/utils"
 )
 
 type Volume struct {
 	ID          string
+	Created     time.Time
 	Path        string
 	IsBindMount bool
 	Writable    bool
 	containers  map[string]struct{}
+	Name        string
 	configPath  string
 	repository  *Repository
 	lock        sync.Mutex
@@ -94,6 +98,15 @@ func (v *Volume) initialize() error {
 	defer f.Close()
 
 	return v.toDisk()
+}
+
+func (v *Volume) Size() int64 {
+	size, err := utils.TreeSize(v.Path)
+	if err != nil {
+		return -1
+	}
+
+	return size
 }
 
 func (v *Volume) ToDisk() error {

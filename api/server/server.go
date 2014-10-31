@@ -20,6 +20,8 @@ import (
 	"syscall"
 
 	"code.google.com/p/go.net/websocket"
+	"github.com/docker/libchan"
+	"github.com/docker/libchan/spdy"
 	"github.com/docker/libcontainer/user"
 	"github.com/gorilla/mux"
 
@@ -1369,6 +1371,130 @@ func ServeFd(addr string, handle http.Handler) error {
 	return nil
 }
 
+func setupTls(cert, key, ca string, l net.Listener) (net.Listener, error) {
+	tlsCert, err := tls.LoadX509KeyPair(cert, key)
+	if err != nil {
+		return nil, fmt.Errorf("Couldn't load X509 key pair (%s, %s): %s. Key encrypted?",
+			cert, key, err)
+	}
+	tlsConfig := &tls.Config{
+		NextProtos:   []string{"http/1.1"},
+		Certificates: []tls.Certificate{tlsCert},
+		// Avoid fallback on insecure SSL protocols
+		MinVersion: tls.VersionTLS10,
+	}
+
+	if ca != "" {
+		certPool := x509.NewCertPool()
+		file, err := ioutil.ReadFile(ca)
+		if err != nil {
+			return nil, fmt.Errorf("Couldn't read CA certificate: %s", err)
+		}
+		certPool.AppendCertsFromPEM(file)
+		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+		tlsConfig.ClientCAs = certPool
+	}
+
+	return tls.NewListener(l, tlsConfig), nil
+}
+
+func ServeChan(addr string, job *engine.Job) error {
+	var (
+		l       net.Listener
+		err     error
+		tlsCert = job.Getenv("TlsCert")
+		tlsKey  = job.Getenv("TlsKey")
+		eng     = job.Eng
+	)
+
+	l, err = net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+
+	var ca string
+	if job.GetenvBool("TlsVerify") {
+		ca = job.Getenv("TlsCa")
+	}
+	l, err = setupTls(tlsCert, tlsKey, ca, l)
+	if err != nil {
+		return err
+	}
+
+	tl, err := spdy.NewTransportListener(l, spdy.NoAuthenticator)
+	if err != nil {
+		return err
+	}
+	for {
+		t, err := tl.AcceptTransport()
+		if err != nil {
+			log.Error(err)
+			break
+		}
+		log.Debugf("Got connection")
+
+		go func() {
+			for {
+				log.Debugf("Waiting for message")
+				receiver, err := t.WaitReceiveChannel()
+				if err != nil {
+					log.Error(err)
+					break
+				}
+				log.Debugf("Handling conn")
+				if err := handleChanConn(receiver, eng); err != nil {
+					log.Error(err)
+					break
+				}
+			}
+		}()
+	}
+
+	return nil
+}
+
+type ChanMessage struct {
+	Ret  libchan.Sender
+	Job  string
+	Data map[string]string
+}
+
+func handleChanConn(receiver libchan.Receiver, eng *engine.Engine) error {
+	var (
+		msg = &ChanMessage{}
+	)
+
+	outR, outW := io.Pipe()
+	errR, errW := io.Pipe()
+
+	if err := receiver.Receive(msg); err != nil {
+		return err
+	}
+
+	job := eng.Job(msg.Job, msg.Data["name"])
+	for k, v := range msg.Data {
+		job.Setenv(k, v)
+	}
+
+	job.Stdout.Add(outW)
+	job.Stderr.Add(errW)
+
+	go func() {
+		job.Run()
+	}()
+
+	type retMsg struct {
+		Errors io.ReadCloser
+		Msg    io.ReadCloser
+	}
+
+	if err := msg.Ret.Send(&retMsg{errR, outR}); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func lookupGidByName(nameOrGid string) (int, error) {
 	groups, err := user.ParseGroupFilter(func(g *user.Group) bool {
 		return g.Name == nameOrGid || strconv.Itoa(g.Gid) == nameOrGid
@@ -1401,6 +1527,10 @@ func ListenAndServe(proto, addr string, job *engine.Job) error {
 		return err
 	}
 
+	if proto == "chan" {
+		return ServeChan(addr, job)
+	}
+
 	if proto == "fd" {
 		return ServeFd(addr, r)
 	}
@@ -1430,31 +1560,14 @@ func ListenAndServe(proto, addr string, job *engine.Job) error {
 	}
 
 	if proto != "unix" && (job.GetenvBool("Tls") || job.GetenvBool("TlsVerify")) {
-		tlsCert := job.Getenv("TlsCert")
-		tlsKey := job.Getenv("TlsKey")
-		cert, err := tls.LoadX509KeyPair(tlsCert, tlsKey)
-		if err != nil {
-			return fmt.Errorf("Couldn't load X509 key pair (%s, %s): %s. Key encrypted?",
-				tlsCert, tlsKey, err)
-		}
-		tlsConfig := &tls.Config{
-			NextProtos:   []string{"http/1.1"},
-			Certificates: []tls.Certificate{cert},
-			// Avoid fallback on insecure SSL protocols
-			MinVersion: tls.VersionTLS10,
-		}
+		var tlsCa string
 		if job.GetenvBool("TlsVerify") {
-			certPool := x509.NewCertPool()
-			file, err := ioutil.ReadFile(job.Getenv("TlsCa"))
-			if err != nil {
-				return fmt.Errorf("Couldn't read CA certificate: %s", err)
-			}
-			certPool.AppendCertsFromPEM(file)
-
-			tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
-			tlsConfig.ClientCAs = certPool
+			tlsCa = job.Getenv("TlsCa")
 		}
-		l = tls.NewListener(l, tlsConfig)
+		l, err = setupTls(job.Getenv("TlsCert"), job.Getenv("TlsKey"), tlsCa, l)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Basic error and sanity checking

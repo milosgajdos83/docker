@@ -98,6 +98,7 @@ type Daemon struct {
 	driver         graphdriver.Driver
 	execDriver     execdriver.Driver
 	trustStore     *trust.TrustStore
+	channels       *chanRepo
 }
 
 // Install installs daemon capabilities to eng.
@@ -911,6 +912,7 @@ func NewDaemonFromDirectory(config *Config, eng *engine.Engine) (*Daemon, error)
 		execDriver:     ed,
 		eng:            eng,
 		trustStore:     t,
+		channels:       newChanRepo(),
 	}
 	if err := daemon.restore(); err != nil {
 		return nil, err

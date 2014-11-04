@@ -242,6 +242,10 @@ func (container *Container) setupMounts() error {
 		mounts = append(mounts, execdriver.Mount{Source: container.HostsPath, Destination: "/etc/hosts", Writable: true, Private: true})
 	}
 
+	if container.SocketPath != "" {
+		mounts = append(mounts, execdriver.Mount{Source: container.SocketPath, Destination: "/var/run/dockerchan.sock", Writable: true, Private: true})
+	}
+
 	// Mount user specified volumes
 	// Note, these are not private because you may want propagation of (un)mounts from host
 	// volumes. For instance if you use -v /usr:/usr and the host later mounts /usr/share you

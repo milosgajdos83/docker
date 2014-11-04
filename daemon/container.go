@@ -70,6 +70,7 @@ type Container struct {
 	ResolvConfPath string
 	HostnamePath   string
 	HostsPath      string
+	SocketPath     string
 	Name           string
 	Driver         string
 	ExecDriver     string
@@ -330,11 +331,35 @@ func (container *Container) Start() (err error) {
 	if err := populateCommand(container, env); err != nil {
 		return err
 	}
+	if container.hostConfig.Privileged {
+		if err := container.setupPrivilegedSocket(); err != nil {
+			return err
+		}
+	}
 	if err := container.setupMounts(); err != nil {
 		return err
 	}
 
 	return container.waitForStart()
+}
+
+func (container *Container) setupPrivilegedSocket() error {
+	if l := container.daemon.channels.Find(container.ID); l != nil {
+		return nil
+	}
+	socketPath, err := container.getRootResourcePath("chan.sock")
+	if err != nil {
+		return err
+	}
+
+	container.SocketPath = socketPath
+
+	l, err := ServeChan(container.SocketPath, container.daemon.eng)
+	if err != nil {
+		return err
+	}
+
+	return container.daemon.channels.Add(container.ID, l)
 }
 
 func (container *Container) Run() error {
@@ -603,6 +628,12 @@ func (container *Container) KillSig(sig int) error {
 	// loop is enough
 	if container.Restarting {
 		return nil
+	}
+
+	if container.hostConfig.Privileged {
+		if err := container.daemon.channels.Remove(container.ID); err != nil {
+			return err
+		}
 	}
 
 	return container.daemon.Kill(container, sig)

@@ -1320,23 +1320,14 @@ func createRouter(eng *engine.Engine, logging, enableCors bool, dockerVersion st
 	return r, nil
 }
 
-// ServeRequest processes a single http request to the docker remote api.
-// FIXME: refactor this to be part of Server and not require re-creating a new
-// router each time. This requires first moving ListenAndServe into Server.
-func ServeRequest(eng *engine.Engine, apiversion version.Version, w http.ResponseWriter, req *http.Request) error {
-	router, err := createRouter(eng, false, true, "")
+// ServeFD creates an http.Server and sets it up to serve given a socket activated
+// argument.
+func ServeFd(addr string, job *engine.Job) error {
+	r, err := createRouter(job.Eng, job.GetenvBool("Logging"), job.GetenvBool("EnableCors"), job.Getenv("Version"))
 	if err != nil {
 		return err
 	}
-	// Insert APIVERSION into the request as a convenience
-	req.URL.Path = fmt.Sprintf("/v%s%s", apiversion, req.URL.Path)
-	router.ServeHTTP(w, req)
-	return nil
-}
 
-// ServeFD creates an http.Server and sets it up to serve given a socket activated
-// argument.
-func ServeFd(addr string, handle http.Handler) error {
 	ls, e := systemd.ListenFD(addr)
 	if e != nil {
 		return e
@@ -1354,7 +1345,7 @@ func ServeFd(addr string, handle http.Handler) error {
 	for i := range ls {
 		listener := ls[i]
 		go func() {
-			httpSrv := http.Server{Handler: handle}
+			httpSrv := http.Server{Handler: r}
 			chErrors <- httpSrv.Serve(listener)
 		}()
 	}
@@ -1392,99 +1383,141 @@ func changeGroup(addr string, nameOrGid string) error {
 	return os.Chown(addr, 0, gid)
 }
 
-// ListenAndServe sets up the required http.Server and gets it listening for
-// each addr passed in and does protocol specific checking.
-func ListenAndServe(proto, addr string, job *engine.Job) error {
-	var l net.Listener
+func setupTls(cert, key, ca string, l net.Listener) (net.Listener, error) {
+	tlsCert, err := tls.LoadX509KeyPair(cert, key)
+	if err != nil {
+		return nil, fmt.Errorf("Couldn't load X509 key pair (%s, %s): %s. Key encrypted?",
+			cert, key, err)
+	}
+	tlsConfig := &tls.Config{
+		NextProtos:   []string{"http/1.1"},
+		Certificates: []tls.Certificate{tlsCert},
+		// Avoid fallback on insecure SSL protocols
+		MinVersion: tls.VersionTLS10,
+	}
+
+	if ca != "" {
+		certPool := x509.NewCertPool()
+		file, err := ioutil.ReadFile(ca)
+		if err != nil {
+			return nil, fmt.Errorf("Couldn't read CA certificate: %s", err)
+		}
+		certPool.AppendCertsFromPEM(file)
+		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+		tlsConfig.ClientCAs = certPool
+	}
+
+	return tls.NewListener(l, tlsConfig), nil
+}
+
+type Server interface {
+	Serve() error
+	Close() error
+}
+
+type HttpServer struct {
+	*http.Server
+	l net.Listener
+}
+
+func (s *HttpServer) Serve() error {
+	return s.Server.Serve(s.l)
+}
+func (s *HttpServer) Close() error {
+	return s.l.Close()
+}
+
+func newListener(proto, addr string, bufferRequests bool) (net.Listener, error) {
+	if bufferRequests {
+		return listenbuffer.NewListenBuffer(proto, addr, activationLock)
+	}
+
+	return net.Listen(proto, addr)
+}
+
+func cleanupUnix(addr string) (int, error) {
+	var mask = 0777
+	if err := syscall.Unlink(addr); err != nil && !os.IsNotExist(err) {
+		return mask, err
+	}
+	syscall.Umask(mask)
+	return mask, nil
+}
+
+func setupUnixHttp(addr string, job *engine.Job) (*HttpServer, error) {
 	r, err := createRouter(job.Eng, job.GetenvBool("Logging"), job.GetenvBool("EnableCors"), job.Getenv("Version"))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	if proto == "fd" {
-		return ServeFd(addr, r)
-	}
-
-	if proto == "unix" {
-		if err := syscall.Unlink(addr); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-	}
-
-	var oldmask int
-	if proto == "unix" {
-		oldmask = syscall.Umask(0777)
-	}
-
-	if job.GetenvBool("BufferRequests") {
-		l, err = listenbuffer.NewListenBuffer(proto, addr, activationLock)
-	} else {
-		l, err = net.Listen(proto, addr)
-	}
-
-	if proto == "unix" {
-		syscall.Umask(oldmask)
-	}
+	mask, err := cleanupUnix(addr)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	l, err := newListener("unix", addr, job.GetenvBool("BufferRequests"))
+	if err != nil {
+		return nil, err
+	}
+	syscall.Umask(mask)
+
+	server := &HttpServer{&http.Server{Addr: addr, Handler: r}, l}
+
+	var socketGroup = job.Getenv("SocketGroup")
+	if socketGroup == "" {
+		return server, nil
 	}
 
-	if proto != "unix" && (job.GetenvBool("Tls") || job.GetenvBool("TlsVerify")) {
-		tlsCert := job.Getenv("TlsCert")
-		tlsKey := job.Getenv("TlsKey")
-		cert, err := tls.LoadX509KeyPair(tlsCert, tlsKey)
-		if err != nil {
-			return fmt.Errorf("Couldn't load X509 key pair (%s, %s): %s. Key encrypted?",
-				tlsCert, tlsKey, err)
+	if err := changeGroup(addr, socketGroup); err != nil {
+		if socketGroup == "docker" {
+			log.Debugf("Warning: could not chgrp %s to docker: %s", addr, err.Error())
+			return server, nil
 		}
-		tlsConfig := &tls.Config{
-			NextProtos:   []string{"http/1.1"},
-			Certificates: []tls.Certificate{cert},
-			// Avoid fallback on insecure SSL protocols
-			MinVersion: tls.VersionTLS10,
-		}
+		return nil, err
+	}
+	return server, nil
+}
+
+func setupTcpHttp(addr string, job *engine.Job) (*HttpServer, error) {
+	if !strings.HasPrefix(addr, "127.0.0.1") && !job.GetenvBool("TlsVerify") {
+		log.Infof("/!\\ DON'T BIND ON ANOTHER IP ADDRESS THAN 127.0.0.1 IF YOU DON'T KNOW WHAT YOU'RE DOING /!\\")
+	}
+
+	r, err := createRouter(job.Eng, job.GetenvBool("Logging"), job.GetenvBool("EnableCors"), job.Getenv("Version"))
+	if err != nil {
+		return nil, err
+	}
+
+	l, err := newListener("tcp", addr, job.GetenvBool("BufferRequests"))
+	if err != nil {
+		return nil, err
+	}
+
+	if job.GetenvBool("Tls") || job.GetenvBool("TlsVerify") {
+		var tlsCa string
 		if job.GetenvBool("TlsVerify") {
-			certPool := x509.NewCertPool()
-			file, err := ioutil.ReadFile(job.Getenv("TlsCa"))
-			if err != nil {
-				return fmt.Errorf("Couldn't read CA certificate: %s", err)
-			}
-			certPool.AppendCertsFromPEM(file)
-
-			tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
-			tlsConfig.ClientCAs = certPool
+			tlsCa = job.Getenv("TlsCa")
 		}
-		l = tls.NewListener(l, tlsConfig)
+		l, err = setupTls(job.Getenv("TlsCert"), job.Getenv("TlsKey"), tlsCa, l)
+		if err != nil {
+			return nil, err
+		}
 	}
+	return &HttpServer{&http.Server{Addr: addr, Handler: r}, l}, nil
+}
 
+// NewServer sets up the required Server and does protocol specific checking.
+func NewServer(proto, addr string, job *engine.Job) (Server, error) {
 	// Basic error and sanity checking
 	switch proto {
+	case "fd":
+		return nil, ServeFd(addr, job)
 	case "tcp":
-		if !strings.HasPrefix(addr, "127.0.0.1") && !job.GetenvBool("TlsVerify") {
-			log.Infof("/!\\ DON'T BIND ON ANOTHER IP ADDRESS THAN 127.0.0.1 IF YOU DON'T KNOW WHAT YOU'RE DOING /!\\")
-		}
+		return setupTcpHttp(addr, job)
 	case "unix":
-		socketGroup := job.Getenv("SocketGroup")
-		if socketGroup != "" {
-			if err := changeGroup(addr, socketGroup); err != nil {
-				if socketGroup == "docker" {
-					// if the user hasn't explicitly specified the group ownership, don't fail on errors.
-					log.Debugf("Warning: could not chgrp %s to docker: %s", addr, err.Error())
-				} else {
-					return err
-				}
-			}
-
-		}
-		if err := os.Chmod(addr, 0660); err != nil {
-			return err
-		}
+		return setupUnixHttp(addr, job)
 	default:
-		return fmt.Errorf("Invalid protocol format.")
+		return nil, fmt.Errorf("Invalid protocol format.")
 	}
-
-	httpSrv := http.Server{Addr: addr, Handler: r}
-	return httpSrv.Serve(l)
 }
 
 // ServeApi loops through all of the protocols sent in to docker and spawns
@@ -1506,7 +1539,13 @@ func ServeApi(job *engine.Job) engine.Status {
 		}
 		go func() {
 			log.Infof("Listening for HTTP on %s (%s)", protoAddrParts[0], protoAddrParts[1])
-			chErrors <- ListenAndServe(protoAddrParts[0], protoAddrParts[1], job)
+			srv, err := NewServer(protoAddrParts[0], protoAddrParts[1], job)
+			if err != nil {
+				chErrors <- err
+			}
+			if srv != nil {
+				chErrors <- srv.Serve()
+			}
 		}()
 	}
 

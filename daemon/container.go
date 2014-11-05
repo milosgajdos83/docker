@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+
 	"os"
 	"path"
 	"path/filepath"
@@ -18,7 +19,9 @@ import (
 	"github.com/docker/libcontainer/label"
 
 	log "github.com/Sirupsen/logrus"
+	apiserver "github.com/docker/docker/api/server"
 	"github.com/docker/docker/daemon/execdriver"
+	"github.com/docker/docker/dockerversion"
 	"github.com/docker/docker/engine"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/links"
@@ -67,12 +70,14 @@ type Container struct {
 
 	NetworkSettings *NetworkSettings
 
-	ResolvConfPath string
-	HostnamePath   string
-	HostsPath      string
-	Name           string
-	Driver         string
-	ExecDriver     string
+	ResolvConfPath          string
+	HostnamePath            string
+	HostsPath               string
+	IntrospectionSocketPath string
+	introspectionSocket     apiserver.Server
+	Name                    string
+	Driver                  string
+	ExecDriver              string
 
 	command *execdriver.Command
 	StreamConfig
@@ -338,11 +343,51 @@ func (container *Container) Start() (err error) {
 	if err := populateCommand(container, env); err != nil {
 		return err
 	}
+
+	if container.hostConfig.Privileged {
+		if err := container.setupIntrospectionSocket(); err != nil {
+			return err
+		}
+	}
 	if err := container.setupMounts(); err != nil {
 		return err
 	}
 
 	return container.waitForStart()
+}
+
+func (container *Container) setupIntrospectionSocket() error {
+	log.Debugf("Setting up introspection socket for %s", container.ID)
+	if container.introspectionSocket != nil {
+		log.Debugf("Introspection socket for %s already exists", container.ID)
+		return nil
+	}
+
+	socketPath, err := container.getRootResourcePath("docker.sock")
+	if err != nil {
+		return err
+	}
+
+	container.IntrospectionSocketPath = socketPath
+	job := container.daemon.eng.Job("serveapi", "unix://"+container.IntrospectionSocketPath)
+	job.SetenvBool("EnableCors", false)
+	job.Setenv("Version", dockerversion.VERSION)
+	job.SetenvBool("BufferRequests", true)
+
+	srv, err := apiserver.NewServer("unix", container.IntrospectionSocketPath, job)
+	if err != nil {
+		return err
+	}
+
+	container.introspectionSocket = srv
+	go func() {
+		if err := srv.Serve(); err != nil && !strings.HasSuffix(err.Error(), "use of closed network connection") {
+			log.Debugf("Error with introspection socket for container %s: %q", container.ID, err)
+			srv.Close()
+			container.introspectionSocket = nil
+		}
+	}()
+	return nil
 }
 
 func (container *Container) Run() error {
@@ -614,6 +659,14 @@ func (container *Container) KillSig(sig int) error {
 	// loop is enough
 	if container.Restarting {
 		return nil
+	}
+
+	if container.IntrospectionSocketPath != "" && container.introspectionSocket != nil {
+		log.Debugf("Closing introspection socket for %s", container.ID)
+		if err := container.introspectionSocket.Close(); err != nil {
+			return err
+		}
+		container.introspectionSocket = nil
 	}
 
 	return container.daemon.Kill(container, sig)

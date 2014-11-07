@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/docker/docker/api"
+	"github.com/docker/docker/api/server"
 	"github.com/docker/docker/engine"
 	"github.com/docker/docker/pkg/version"
 )
@@ -484,7 +485,7 @@ func serveRequestUsingVersion(method, target string, version version.Version, bo
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ServeRequest(eng, version, r, req); err != nil {
+	if err := server.ServeRequest(eng, version, r, req); err != nil {
 		t.Fatal(err)
 	}
 	return r

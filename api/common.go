@@ -13,12 +13,12 @@ import (
 
 const (
 	APIVERSION        version.Version = "1.16"
-	DEFAULTHTTPHOST                   = "127.0.0.1"
+	DEFAULTTCPHOST                    = "127.0.0.1"
 	DEFAULTUNIXSOCKET                 = "/var/run/docker.sock"
 )
 
 func ValidateHost(val string) (string, error) {
-	host, err := parsers.ParseHost(DEFAULTHTTPHOST, DEFAULTUNIXSOCKET, val)
+	host, err := parsers.ParseHost(DEFAULTTCPHOST, DEFAULTUNIXSOCKET, val)
 	if err != nil {
 		return val, err
 	}

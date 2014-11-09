@@ -101,9 +101,10 @@ func setupChanTcp(addr string, job *engine.Job) (*ChanServer, error) {
 
 type ChanMessage struct {
 	Ret  libchan.Sender
-	In   libchan.Receiver
+	In   io.ReadCloser
 	Job  string
-	Data map[string]string
+	Name string
+	Env  map[string]interface{}
 }
 
 func (s *ChanServer) handleConn(receiver libchan.Receiver) error {
@@ -118,16 +119,18 @@ func (s *ChanServer) handleConn(receiver libchan.Receiver) error {
 		return err
 	}
 
-	job := s.eng.Job(msg.Job, msg.Data["name"])
-	for k, v := range msg.Data {
-		job.Setenv(k, v)
-	}
+	job := s.eng.Job(msg.Job, msg.Name)
+	job.ImportEnv(msg.Env)
 
 	job.Stdout.Add(outW)
 	job.Stderr.Add(errW)
+	if msg.In != nil {
+		job.Stdin.Add(msg.In)
+	}
 
+	chJobErr := make(chan error)
 	go func() {
-		job.Run()
+		chJobErr <- job.Run()
 	}()
 
 	type retMsg struct {
@@ -139,5 +142,5 @@ func (s *ChanServer) handleConn(receiver libchan.Receiver) error {
 		return err
 	}
 
-	return nil
+	return <-chJobErr
 }

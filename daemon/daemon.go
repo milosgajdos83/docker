@@ -899,12 +899,12 @@ func NewDaemonFromDirectory(config *Config, eng *engine.Engine) (*Daemon, error)
 		return nil, err
 	}
 
-	volumesDriver, err := graphdriver.GetDriver("vfs", config.Root, config.GraphOptions)
-	if err != nil {
-		return nil, err
-	}
+	//volumesDriver, err := graphdriver.GetDriver("vfs", config.Root, config.GraphOptions)
+	//if err != nil {
+	//	return nil, err
+	//}
 
-	volumes, err := volumes.NewRepository(filepath.Join(config.Root, "volumes"), volumesDriver)
+	volumes, err := volumes.NewRepository(filepath.Join(config.Root, "volumes"), config.Root)
 	if err != nil {
 		return nil, err
 	}

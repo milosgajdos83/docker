@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/docker/docker/daemon/graphdriver"
 	_ "github.com/docker/docker/daemon/graphdriver/vfs"
 )
 
@@ -28,7 +27,7 @@ func TestRepositoryFindOrCreate(t *testing.T) {
 	}
 
 	// FIXME: volumes are heavily dependent on the vfs driver, but this should not be so!
-	expected := filepath.Join(root, "repo-graph", "vfs", "dir", v.ID)
+	expected := filepath.Join(root, "vfs", "dir", v.ID)
 	if v.Path != expected {
 		t.Fatalf("expected new path to be created in %s, got %s", expected, v.Path)
 	}
@@ -153,12 +152,5 @@ func TestRepositoryDelete(t *testing.T) {
 }
 
 func newRepo(root string) (*Repository, error) {
-	configPath := filepath.Join(root, "repo-config")
-	graphDir := filepath.Join(root, "repo-graph")
-
-	driver, err := graphdriver.GetDriver("vfs", graphDir, []string{})
-	if err != nil {
-		return nil, err
-	}
-	return NewRepository(configPath, driver)
+	return NewRepository(filepath.Join(root, "repo-config"), root)
 }

@@ -86,6 +86,7 @@ type Container struct {
 	// Maps container paths to volume paths.  The key in this is the path to which
 	// the volume is being mounted inside the container.  Value is the path of the
 	// volume on disk
+	// FIXME: This should map to ID's, not host paths
 	Volumes map[string]string
 	// Store rw/ro in a separate structure to preserve reverse-compatibility on-disk.
 	// Easier than migrating older container configs :)
@@ -895,22 +896,10 @@ func (container *Container) Copy(resource string) (io.ReadCloser, error) {
 		return nil, err
 	}
 
-	// Check if this is actually in a volume
-	for _, mnt := range container.volumeMounts() {
-		if len(mnt.toPath) > 0 && strings.HasPrefix(resource, mnt.toPath[1:]) {
-			if v := container.daemon.volumes.Get(mnt.fromPath); v != nil {
-				var name string
-				if resource == mnt.toPath[1:] {
-					name = filepath.Base(resource)
-				}
-				path, err := filepath.Rel(mnt.toPath[1:], resource)
-				if err != nil {
-					return nil, err
-				}
-				return v.Export(path, name)
-			}
-		}
+	if err := container.mountVolumes(); err != nil {
+		return nil, err
 	}
+	defer container.unmountVolumes()
 
 	stat, err := os.Stat(basePath)
 	if err != nil {

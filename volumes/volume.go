@@ -2,64 +2,30 @@ package volumes
 
 import (
 	"encoding/json"
-	"io"
+	"fmt"
 	"io/ioutil"
 	"os"
-	"path"
 	"path/filepath"
 	"sync"
 
-	"github.com/docker/docker/pkg/archive"
 	"github.com/docker/docker/pkg/symlink"
+	"github.com/docker/docker/volumes/volumedriver"
 )
 
 type Volume struct {
-	ID          string
-	Path        string
-	IsBindMount bool
-	Writable    bool
-	containers  map[string]struct{}
-	configPath  string
-	repository  *Repository
-	lock        sync.Mutex
+	ID         string // ID assigned by docker
+	containers map[string]struct{}
+	configPath string
+	*volumeConfig
+	volumedriver.Driver
+	Path     string // Deprecated
+	Writable bool   // Deprecated
+	lock     sync.Mutex
 }
 
-func (v *Volume) Export(resource, name string) (io.ReadCloser, error) {
-	if v.IsBindMount && filepath.Base(resource) == name {
-		name = ""
-	}
-
-	basePath, err := v.getResourcePath(resource)
-	if err != nil {
-		return nil, err
-	}
-	stat, err := os.Stat(basePath)
-	if err != nil {
-		return nil, err
-	}
-	var filter []string
-	if !stat.IsDir() {
-		d, f := path.Split(basePath)
-		basePath = d
-		filter = []string{f}
-	} else {
-		filter = []string{path.Base(basePath)}
-		basePath = path.Dir(basePath)
-	}
-	return archive.TarWithOptions(basePath, &archive.TarOptions{
-		Compression:  archive.Uncompressed,
-		Name:         name,
-		IncludeFiles: filter,
-	})
-}
-
-func (v *Volume) IsDir() (bool, error) {
-	stat, err := os.Stat(v.Path)
-	if err != nil {
-		return false, err
-	}
-
-	return stat.IsDir(), nil
+type volumeConfig struct {
+	DriverName string
+	Opts       []string
 }
 
 func (v *Volume) Containers() []string {
@@ -86,38 +52,6 @@ func (v *Volume) AddContainer(containerId string) {
 	v.lock.Unlock()
 }
 
-func (v *Volume) initialize() error {
-	v.lock.Lock()
-	defer v.lock.Unlock()
-
-	if _, err := os.Stat(v.Path); err != nil && os.IsNotExist(err) {
-		if err := os.MkdirAll(v.Path, 0755); err != nil {
-			return err
-		}
-	}
-
-	if err := os.MkdirAll(v.configPath, 0755); err != nil {
-		return err
-	}
-	jsonPath, err := v.jsonPath()
-	if err != nil {
-		return err
-	}
-	f, err := os.Create(jsonPath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	return v.toDisk()
-}
-
-func (v *Volume) ToDisk() error {
-	v.lock.Lock()
-	defer v.lock.Unlock()
-	return v.toDisk()
-}
-
 func (v *Volume) toDisk() error {
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -129,26 +63,55 @@ func (v *Volume) toDisk() error {
 		return err
 	}
 
-	return ioutil.WriteFile(pth, data, 0666)
+	_, err = os.Stat(pth)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(pth), 0750); err != nil {
+			return err
+		}
+	}
+
+	return ioutil.WriteFile(pth, data, 0660)
 }
 
-func (v *Volume) FromDisk() error {
+func (v *Volume) fromDisk() error {
 	v.lock.Lock()
 	defer v.lock.Unlock()
+
 	pth, err := v.jsonPath()
 	if err != nil {
 		return err
 	}
 
-	jsonSource, err := os.Open(pth)
+	data, err := ioutil.ReadFile(pth)
 	if err != nil {
 		return err
 	}
-	defer jsonSource.Close()
 
-	dec := json.NewDecoder(jsonSource)
+	var config *volumeConfig
+	if err := json.Unmarshal(data, &config); err != nil {
+		return fmt.Errorf("error getting driver from volume config json: %v", err)
+	}
+	driver, err := volumedriver.NewDriver(config.DriverName, config.Opts)
+	if err != nil {
+		return err
+	}
+	v.Driver = driver
+	if err := json.Unmarshal(data, &v); err != nil {
+		return fmt.Errorf("error reading volume config json: %v", err)
+	}
 
-	return dec.Decode(v)
+	return nil
+}
+
+func (v *Volume) Create() error {
+	if err := v.Driver.Create(); err != nil {
+		return err
+	}
+
+	return v.toDisk()
 }
 
 func (v *Volume) jsonPath() (string, error) {
@@ -157,9 +120,4 @@ func (v *Volume) jsonPath() (string, error) {
 func (v *Volume) getRootResourcePath(path string) (string, error) {
 	cleanPath := filepath.Join("/", path)
 	return symlink.FollowSymlinkInScope(filepath.Join(v.configPath, cleanPath), v.configPath)
-}
-
-func (v *Volume) getResourcePath(path string) (string, error) {
-	cleanPath := filepath.Join("/", path)
-	return symlink.FollowSymlinkInScope(filepath.Join(v.Path, cleanPath), v.Path)
 }

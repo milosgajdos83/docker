@@ -1,6 +1,7 @@
 package volumes
 
 import (
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -10,16 +11,26 @@ import (
 	log "github.com/Sirupsen/logrus"
 	"github.com/docker/docker/daemon/graphdriver"
 	"github.com/docker/docker/utils"
+
+	"github.com/docker/docker/volumes/volumedriver"
+	_ "github.com/docker/docker/volumes/volumedriver/host"
+	_ "github.com/docker/docker/volumes/volumedriver/vfs"
 )
+
+var DriverNotExist = errors.New("driver does not exist")
+var IdGenerateErr = errors.New("failed to generate unique volume ID")
+var DataExist = errors.New(volumedriver.DataExist.Error() + " - not managing")
 
 type Repository struct {
 	configPath string
-	driver     graphdriver.Driver
+	storePath  string
 	volumes    map[string]*Volume
+	idIndex    map[string]*Volume
+	driver     graphdriver.Driver
 	lock       sync.Mutex
 }
 
-func NewRepository(configPath string, driver graphdriver.Driver) (*Repository, error) {
+func NewRepository(configPath string, storePath string) (*Repository, error) {
 	abspath, err := filepath.Abs(configPath)
 	if err != nil {
 		return nil, err
@@ -31,53 +42,13 @@ func NewRepository(configPath string, driver graphdriver.Driver) (*Repository, e
 	}
 
 	repo := &Repository{
-		driver:     driver,
+		storePath:  storePath,
 		configPath: abspath,
 		volumes:    make(map[string]*Volume),
+		idIndex:    make(map[string]*Volume),
 	}
 
 	return repo, repo.restore()
-}
-
-func (r *Repository) newVolume(path string, writable bool) (*Volume, error) {
-	var (
-		isBindMount bool
-		err         error
-		id          = utils.GenerateRandomID()
-	)
-	if path != "" {
-		isBindMount = true
-	}
-
-	if path == "" {
-		path, err = r.createNewVolumePath(id)
-		if err != nil {
-			return nil, err
-		}
-	}
-	path = filepath.Clean(path)
-
-	// Ignore the error here since the path may not exist
-	// Really just want to make sure the path we are using is real(or non-existant)
-	if cleanPath, err := filepath.EvalSymlinks(path); err == nil {
-		path = cleanPath
-	}
-
-	v := &Volume{
-		ID:          id,
-		Path:        path,
-		repository:  r,
-		Writable:    writable,
-		containers:  make(map[string]struct{}),
-		configPath:  r.configPath + "/" + id,
-		IsBindMount: isBindMount,
-	}
-
-	if err := v.initialize(); err != nil {
-		return nil, err
-	}
-
-	return v, r.add(v)
 }
 
 func (r *Repository) restore() error {
@@ -93,13 +64,9 @@ func (r *Repository) restore() error {
 			configPath: r.configPath + "/" + id,
 			containers: make(map[string]struct{}),
 		}
-		if err := vol.FromDisk(); err != nil {
+		if err := vol.fromDisk(); err != nil {
 			if !os.IsNotExist(err) {
 				log.Debugf("Error restoring volume: %v", err)
-				continue
-			}
-			if err := vol.initialize(); err != nil {
-				log.Debugf("%s", err)
 				continue
 			}
 		}
@@ -118,31 +85,25 @@ func (r *Repository) Get(path string) *Volume {
 }
 
 func (r *Repository) get(path string) *Volume {
-	path, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return nil
-	}
-	return r.volumes[filepath.Clean(path)]
+	return r.volumes[path]
 }
 
 func (r *Repository) add(volume *Volume) error {
-	if vol := r.get(volume.Path); vol != nil {
+	if vol := r.get(volume.String()); vol != nil {
 		return fmt.Errorf("Volume exists: %s", volume.ID)
 	}
-	r.volumes[volume.Path] = volume
+	r.volumes[volume.String()] = volume
+	r.idIndex[volume.ID] = volume
 	return nil
 }
 
-func (r *Repository) Delete(path string) error {
+func (r *Repository) Delete(id string) error {
 	r.lock.Lock()
 	defer r.lock.Unlock()
-	path, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return err
-	}
-	volume := r.get(filepath.Clean(path))
+
+	volume := r.get(id)
 	if volume == nil {
-		return fmt.Errorf("Volume %s does not exist", path)
+		return fmt.Errorf("Volume %s does not exist", id)
 	}
 
 	containers := volume.Containers()
@@ -154,42 +115,72 @@ func (r *Repository) Delete(path string) error {
 		return err
 	}
 
-	if !volume.IsBindMount {
-		if err := r.driver.Remove(volume.ID); err != nil {
-			if !os.IsNotExist(err) {
-				return err
-			}
-		}
+	if err := volume.Remove(); err != nil {
+		return err
 	}
 
-	delete(r.volumes, volume.Path)
+	delete(r.volumes, volume.String())
+	delete(r.idIndex, volume.ID)
 	return nil
 }
 
-func (r *Repository) createNewVolumePath(id string) (string, error) {
-	if err := r.driver.Create(id, ""); err != nil {
-		return "", err
-	}
-
-	path, err := r.driver.Get(id, "")
-	if err != nil {
-		return "", fmt.Errorf("Driver %s failed to get volume rootfs %s: %v", r.driver, id, err)
-	}
-
-	return path, nil
-}
-
-func (r *Repository) FindOrCreateVolume(path string, writable bool) (*Volume, error) {
+func (r *Repository) FindOrCreateVolume(driver string, opts []string) (*Volume, error) {
 	r.lock.Lock()
 	defer r.lock.Unlock()
 
-	if path == "" {
-		return r.newVolume(path, writable)
+	if driver == "" {
+		driver = "vfs"
 	}
 
-	if v := r.get(path); v != nil {
+	v, err := r.newVolume(driver, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	if v := r.get(v.String()); v != nil {
+		log.Debugf("found existing volume for: %s %v", driver, opts)
 		return v, nil
 	}
 
-	return r.newVolume(path, writable)
+	if err := v.Create(); err != nil {
+		v.Remove()
+		return nil, err
+	}
+
+	return v, r.add(v)
+}
+
+func (r *Repository) newVolume(driver string, opts []string) (*Volume, error) {
+	id, err := r.generateId()
+	if err != nil {
+		return nil, err
+	}
+	opts = append(opts, "id="+id)
+	opts = append(opts, "home="+filepath.Join(filepath.Dir(r.configPath), driver))
+
+	d, err := volumedriver.NewDriver(driver, opts)
+	if err != nil {
+		if err == volumedriver.DataExist {
+			return nil, DataExist
+		}
+		return nil, err
+	}
+
+	configPath := filepath.Join(r.configPath, id)
+	return &Volume{
+		ID:           id,
+		Driver:       d,
+		containers:   make(map[string]struct{}),
+		volumeConfig: &volumeConfig{DriverName: driver, Opts: opts},
+		configPath:   configPath}, nil
+}
+
+func (r *Repository) generateId() (string, error) {
+	for i := 0; i < 5; i++ {
+		id := utils.GenerateRandomID()
+		if _, exists := r.idIndex[id]; !exists {
+			return id, nil
+		}
+	}
+	return "", IdGenerateErr
 }

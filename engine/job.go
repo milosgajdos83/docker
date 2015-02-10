@@ -50,6 +50,8 @@ const (
 // If the job returns a failure status, an error is returned
 // which includes the status.
 func (job *Job) Run() error {
+	job.wg.Add(1)
+	defer job.wg.Done()
 	if job.Eng.IsShutdown() && !job.GetenvBool("overrideShutdown") {
 		return fmt.Errorf("engine is shutdown")
 	}
@@ -69,8 +71,6 @@ func (job *Job) Run() error {
 	if !job.end.IsZero() {
 		return fmt.Errorf("%s: job has already completed", job.Name)
 	}
-	job.wg.Add(1)
-	defer job.wg.Done()
 	// Log beginning and end of the job
 	if job.Eng.Logging {
 		log.Infof("+job %s", job.CallString())

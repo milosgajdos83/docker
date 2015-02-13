@@ -27,6 +27,9 @@ func (daemon *Daemon) ContainerStats(job *engine.Job) engine.Status {
 			daemon.UnsubscribeToContainerStats(job.Args[0], updates)
 			return job.Error(err)
 		}
+		if !job.GetenvBool("stream") {
+			break
+		}
 	}
 	return engine.StatusOK
 }

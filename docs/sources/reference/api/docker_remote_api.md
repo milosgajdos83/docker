@@ -67,6 +67,12 @@ This endpoint now returns `SystemTime`, `HttpProxy`,`HttpsProxy` and `NoProxy`.
 **New!**
 Added a `RepoDigests` field to include image digest information.
 
+`GET /containers/(id)/stats`
+
+**New!**
+You can now supply a `stream` bool to get only one set of stats and
+disconnect
+
 ## v1.17
 
 ### Full Documentation

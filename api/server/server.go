@@ -429,6 +429,13 @@ func getContainersStats(eng *engine.Engine, version version.Version, w http.Resp
 	}
 	name := vars["name"]
 	job := eng.Job("container_stats", name)
+
+	stream := r.Form.Get("stream")
+	if stream == "" {
+		stream = "1"
+	}
+
+	job.Setenv("stream", stream)
 	streamJSON(job, w, true)
 	return job.Run()
 }

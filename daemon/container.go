@@ -896,21 +896,21 @@ func (container *Container) Copy(resource string) (io.ReadCloser, error) {
 		return nil, err
 	}
 
-	basePath, err := container.getResourcePath(resource)
-	if err != nil {
+	if err := container.mountVolumes(); err != nil {
 		container.Unmount()
 		return nil, err
 	}
 
-	// Check if this is actually in a volume
-	for _, mnt := range container.VolumeMounts() {
-		if len(mnt.MountToPath) > 0 && strings.HasPrefix(resource, mnt.MountToPath[1:]) {
-			return mnt.Export(resource)
-		}
+	basePath, err := container.getResourcePath(resource)
+	if err != nil {
+		container.unmountVolumes()
+		container.Unmount()
+		return nil, err
 	}
 
 	stat, err := os.Stat(basePath)
 	if err != nil {
+		container.unmountVolumes()
 		container.Unmount()
 		return nil, err
 	}
@@ -929,11 +929,13 @@ func (container *Container) Copy(resource string) (io.ReadCloser, error) {
 		IncludeFiles: filter,
 	})
 	if err != nil {
+		container.unmountVolumes()
 		container.Unmount()
 		return nil, err
 	}
 	return ioutils.NewReadCloserWrapper(archive, func() error {
 			err := archive.Close()
+			container.unmountVolumes()
 			container.Unmount()
 			return err
 		}),

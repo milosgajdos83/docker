@@ -13,6 +13,7 @@ import (
 	log "github.com/Sirupsen/logrus"
 	"github.com/docker/docker/daemon/execdriver"
 	"github.com/docker/docker/pkg/chrootarchive"
+	"github.com/docker/docker/pkg/mount"
 	"github.com/docker/docker/pkg/symlink"
 	"github.com/docker/docker/volumes"
 	"github.com/docker/libcontainer/label"
@@ -402,4 +403,37 @@ func copyOwnership(source, destination string) error {
 	}
 
 	return os.Chmod(destination, os.FileMode(stat.Mode))
+}
+
+func (container *Container) mountVolumes() error {
+	for dest, source := range container.Volumes {
+		v := container.daemon.volumes.Get(source)
+		if v == nil {
+			return fmt.Errorf("could not find volume for %s:%s, impossible to mount", source, dest)
+		}
+
+		destPath, err := container.getResourcePath(dest)
+		if err != nil {
+			return err
+		}
+
+		if err := mount.Mount(source, destPath, "bind", "rbind,rw"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (container *Container) unmountVolumes() {
+	for dest := range container.Volumes {
+		destPath, err := container.getResourcePath(dest)
+		if err != nil {
+			log.Errorf("error unmount volumes: %v", err)
+			continue
+		}
+		if err := mount.ForceUnmount(destPath); err != nil {
+			log.Errorf("error unmount volumes: %v", err)
+			continue
+		}
+	}
 }

@@ -1576,10 +1576,11 @@ func ServeApi(job *engine.Job) engine.Status {
 			}
 			job.Eng.OnShutdown(func() {
 				if err := srv.Close(); err != nil {
-					log.Errorf("%s", err.Error())
+					log.Error(err)
 				}
 			})
 			chErrors <- srv.Serve()
+			srv.Close()
 		}()
 	}
 

@@ -201,6 +201,9 @@ func (r *Repository) FindOrCreateVolume(path, containerId string, writable bool)
 		return nil, err
 	}
 
+	// TODO: this part semantically doesn't really belong here
+	// registering volumes with extensions should not be part of FindOrCreateVolume()
+	// Moving this to a separate function will allow for testing the correct behavior
 	for _, plugin := range plugins {
 		data := VolumeExtensionReq{
 			HostPath:    path,

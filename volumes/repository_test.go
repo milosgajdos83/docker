@@ -8,6 +8,7 @@ import (
 
 	"github.com/docker/docker/daemon/graphdriver"
 	_ "github.com/docker/docker/daemon/graphdriver/vfs"
+	"github.com/docker/docker/plugins"
 )
 
 func TestRepositoryFindOrCreate(t *testing.T) {
@@ -160,5 +161,6 @@ func newRepo(root string) (*Repository, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewRepository(configPath, driver)
+	pluginRepository := plugins.NewRepository()
+	return NewRepository(pluginRepository, configPath, driver)
 }
